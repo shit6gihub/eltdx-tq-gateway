@@ -119,9 +119,9 @@ def handle_tq_snapshot(params: dict) -> dict:
             "Open": float(s.open_price or 0),
             "Max": float(s.high_price or 0),
             "Min": float(s.low_price or 0),
-            "Volume": int(s.volume or 0),
+            "Volume": int(s.total_hand or 0),
             "Amount": float(s.amount or 0),
-            "Change": float(s.change_amount or 0),
+            "Change": float(s.change or 0),
             "ChangePct": float(s.change_pct or 0),
             "ErrorId": "0",
         }
@@ -136,25 +136,37 @@ def handle_tq_more_info(params: dict) -> dict:
     if not stock_code:
         return {"ErrorId": "-1", "Error": "stock_code required"}
     try:
+        # 先获取快照获取基础数据
         snaps = client.quotes.get_snapshots([parse_tdx_code(stock_code)])
         if not snaps:
             return {"ErrorId": "-1", "Error": "no data"}
 
         s = snaps[0]
-        def safe_get(obj, attr, default=0):
-            try:
-                val = getattr(obj, attr, None)
-                return val if val is not None else default
-            except:
-                return default
+
+        # 从 stock_profile_table 获取财务数据
+        pe = pb = mv = 0.0
+        turnover_rate = 0.0
+        try:
+            profile = client.helpers.stock_profile_table([parse_tdx_code(stock_code)])
+            if profile and profile.get('rows'):
+                row = profile['rows'][0]
+                finance = row.get('finance', {})
+                pe = finance.get('eps', 0) or 0
+                pb = finance.get('mei_gu_jing_zi_chan_raw_float', 0) or 0
+                mv = row.get('total_market_value', 0) or 0
+                turnover_rate = row.get('turnover_rate', 0) or 0
+        except Exception as e:
+            logger.warning(f"Failed to get finance data: {e}")
 
         return {
-            "ZAF": float(safe_get(s, 'change_pct', 0)),
-            "DynaPE": float(safe_get(s, 'pe_ratio', 0)),
-            "PB_MRQ": float(safe_get(s, 'pb_ratio', 0)),
-            "MktCap": float(safe_get(s, 'market_value', 0)),
-            "TotShr": float(safe_get(s, 'total_shares', 0)),
-            "CircShr": float(safe_get(s, 'circulating_shares', 0)),
+            "ZAF": float(s.change_pct or 0),
+            "Zsz": float(mv * 1e8) if mv else 0.0,
+            "Ltsz": float((mv or 0) * 0.6 * 1e8),
+            "fHSL": float(turnover_rate),
+            "fLianB": 0.0,
+            "Wtb": float(s.change_pct or 0),
+            "DynaPE": float(pe),
+            "PB_MRQ": float(pb),
             "ErrorId": "0",
         }
     except Exception as e:
