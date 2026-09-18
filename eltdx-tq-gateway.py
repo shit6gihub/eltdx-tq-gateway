@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""eltdx-TQ Gateway v2.1 - 完整通达信行情网关
+"""eltdx-TQ Gateway v2.3 - 完整通达信行情网关
 
 支持两类接口：
 1. TQ 兼容接口（/jsonrpc, /）：适配 SIDA v0.4.38 TQ vendor
-2. eltdx 原生接口（/rpc）：支持全部 126+ 个公开方法（含 F10）
-
-TQ 方法映射：
-- get_market_snapshot → quotes.get_snapshots
-- get_more_info → quotes.get_snapshots + 字段转换
-- get_market_data → bars.get
-- refresh_kline → 空响应
+2. eltdx 原生接口（/rpc）：支持全部 126+ 个公开方法
 
 用法：
     python3 eltdx-tq-gateway.py [--port 17709] [--host 0.0.0.0]
 """
 import argparse
-import asyncio
 import json
 import logging
+import os
 import sys
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 try:
     from fastapi import FastAPI, Request
@@ -29,15 +24,13 @@ except ImportError:
     print("需要安装: pip install 'eltdx[http]'")
     sys.exit(1)
 
-from eltdx import TdxClient, F10Client
+from eltdx import TdxClient
 from eltdx.http_server import _Gateway as _EltdxGateway
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="eltdx-TQ Gateway")
 client: TdxClient | None = None
-f10_client: F10Client | None = None
 eltdx_gateway: _EltdxGateway | None = None
 
 
@@ -56,35 +49,30 @@ def parse_tdx_code(code: str) -> str:
     return f"sz{code}"
 
 
-async def startup():
-    """启动时初始化客户端"""
-    global client, f10_client, eltdx_gateway
-
-    # 初始化行情客户端
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """应用生命周期管理"""
+    global client, eltdx_gateway
+    
     tdx_host = os.environ.get("TDX_HOST", "114.142.142.124")
     tdx_port = int(os.environ.get("TDX_PORT", "7709"))
-
+    
     print(f"Connecting to TDX server at {tdx_host}:{tdx_port}...")
-    client = TdxClient(timeout=10, host=tdx_host, port=tdx_port)
-    await client.connect()
-
-    # 初始化 F10 客户端（独立连接）
-    print("Connecting to F10 server...")
-    f10_client = F10Client(timeout=10)
-    await f10_client.connect()
-
-    # 创建网关
+    client = TdxClient(timeout=10)
+    client.connect()
+    print(f"Connected: {client.transport.connected_hosts}")
+    
     eltdx_gateway = _EltdxGateway(client)
-    print(f"Gateway ready, client connected: {client.connected}")
-
-
-def shutdown():
-    """关闭时清理资源"""
-    global client, f10_client, eltdx_gateway
+    methods = eltdx_gateway.methods()
+    print(f"Available methods: {len(methods)}")
+    
+    yield
+    
     if client:
         client.close()
-    if f10_client:
-        f10_client.close()
+
+
+app = FastAPI(title="eltdx-TQ Gateway", lifespan=lifespan)
 
 
 # ==================== TQ 兼容接口 ====================
@@ -135,6 +123,7 @@ def handle_tq_snapshot(params: dict) -> dict:
             "Amount": float(s.amount or 0),
             "Change": float(s.change_amount or 0),
             "ChangePct": float(s.change_pct or 0),
+            "ErrorId": "0",
         }
     except Exception as e:
         logger.error(f"Snapshot error: {e}")
@@ -142,7 +131,7 @@ def handle_tq_snapshot(params: dict) -> dict:
 
 
 def handle_tq_more_info(params: dict) -> dict:
-    """获取扩展指标（从快照补充 PE/PB 等字段）"""
+    """获取扩展指标"""
     stock_code = params.get("stock_code", "")
     if not stock_code:
         return {"ErrorId": "-1", "Error": "stock_code required"}
@@ -152,19 +141,20 @@ def handle_tq_more_info(params: dict) -> dict:
             return {"ErrorId": "-1", "Error": "no data"}
 
         s = snaps[0]
-        # 使用 safe_get 避免属性不存在问题
-        d = s.model_dump() if hasattr(s, 'model_dump') else vars(s)
+        def safe_get(obj, attr, default=0):
+            try:
+                val = getattr(obj, attr, None)
+                return val if val is not None else default
+            except:
+                return default
 
         return {
-            "ZAF": float(d.get('change_pct') or 0),
-            "PE": float(d.get('pe_ratio') or 0),
-            "PB": float(d.get('pb_ratio') or 0),
-            "MktCap": float(d.get('market_value') or 0),
-            "TotShr": float(d.get('total_shares') or 0),
-            "CircShr": float(d.get('circulating_shares') or 0),
-            "fHSL": float(d.get('turnover_rate') or 0),
-            "UpDn": float(d.get('up_down_range') or 0),
-            "Wtb": float(d.get('volume_ratio') or 0),
+            "ZAF": float(safe_get(s, 'change_pct', 0)),
+            "DynaPE": float(safe_get(s, 'pe_ratio', 0)),
+            "PB_MRQ": float(safe_get(s, 'pb_ratio', 0)),
+            "MktCap": float(safe_get(s, 'market_value', 0)),
+            "TotShr": float(safe_get(s, 'total_shares', 0)),
+            "CircShr": float(safe_get(s, 'circulating_shares', 0)),
             "ErrorId": "0",
         }
     except Exception as e:
@@ -189,7 +179,7 @@ def handle_tq_kline(params: dict) -> dict:
             bars = client.bars.get(full_code, period=period, count=count)
             result[code] = [
                 {
-                    "Date": b.date.isoformat() if hasattr(b.date, 'isoformat') else str(b.date),
+                    "Date": b.time.date().isoformat() if hasattr(b.time, 'isoformat') else str(b.time),
                     "Open": float(b.open or 0),
                     "Close": float(b.close or 0),
                     "High": float(b.high or 0),
@@ -210,25 +200,44 @@ def handle_tq_kline(params: dict) -> dict:
 @app.get("/health")
 async def health():
     """健康检查"""
-    methods = []
-    if client:
-        methods.extend([m for m in dir(client) if not m.startswith('_')])
-
+    connected = bool(client and client.transport.connected_hosts)
+    methods_count = len(eltdx_gateway.methods()) if eltdx_gateway else 0
     return {
-        "status": "ok" if client and client.connected else "degraded",
-        "connected": client.connected if client else False,
-        "version": "2.1",
-        "methods": methods,
+        "status": "ok" if connected else "degraded",
+        "connected": connected,
+        "version": "2.3",
+        "methods_count": methods_count,
     }
+
+
+# ==================== RPC 接口 ====================
+
+@app.post("/rpc")
+async def rpc(request: Request):
+    """eltdx 原生 RPC 接口"""
+    body = await request.json()
+    method = body.get("method", "")
+    params = body.get("params", {})
+    req_id = body.get("id", 1)
+
+    if not eltdx_gateway:
+        return JSONResponse({"id": req_id, "ok": False, "error": {"type": "RuntimeError", "message": "client not connected"}})
+
+    try:
+        result = eltdx_gateway.call_json(method, params)
+        return {"id": req_id, "ok": True, "result": result}
+    except Exception as e:
+        logger.error(f"RPC error {method}: {e}")
+        return JSONResponse({"id": req_id, "ok": False, "error": {"type": type(e).__name__, "message": str(e)}})
 
 
 # ==================== 主入口 ====================
 
 if __name__ == "__main__":
-    import os
     parser = argparse.ArgumentParser(description="eltdx-TQ Gateway")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "17709")))
     parser.add_argument("--host", type=str, default=os.environ.get("HOST", "0.0.0.0"))
     args = parser.parse_args()
 
-    run(app, host=args.host, port=args.port)
+    print(f"Starting eltdx-TQ Gateway on {args.host}:{args.port}...")
+    run(app, host=args.host, port=args.port, log_level="info")
