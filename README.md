@@ -1,78 +1,60 @@
-# eltdx-TQ Gateway v2.0
+# eltdx-TQ Gateway Docker
 
-通达信 TQ 行情网关，支持 **126 个 eltdx 公开方法**，兼容 SIDA v0.4.38。
+基于 eltdx 的通达信行情网关，支持 SIDA v0.4.38 TQ 接口。
 
-## 接口
+## 特性
 
-| 端点 | 说明 |
-|------|------|
-| `POST /` 或 `POST /jsonrpc` | TQ 兼容接口（SIDA v0.4.38 使用） |
-| `POST /rpc` | eltdx 原生 RPC 接口 |
-| `GET /health` | 健康检查 |
-| `GET /methods` | 列出所有可用方法 |
+- 支持 126 个 eltdx 公开方法
+- TQ 兼容接口（适配 SIDA）
+- Docker 镜像自动构建
 
-## TQ 兼容映射
+## 使用方法
 
-| TQ 方法 | eltdx 方法 |
-|---------|-----------|
-| `get_market_snapshot` | `quotes.get_snapshots` |
-| `get_market_data` | `bars.get` |
-| `get_more_info` | `quotes.get_snapshots` + F10 |
-| `refresh_kline` | 空响应 |
+### 从 Docker Hub 拉取
 
-## 支持的 eltdx 方法（126 个）
+```bash
+docker pull ghcr.io/shit6gihub/eltdx-tq-gateway:latest
+```
 
-- **quotes**: 7 个 - 实时行情、盘口、订阅
-- **bars**: 1 个 - K 线数据
-- **minutes**: 7 个 - 分时数据
-- **trades**: 10 个 - 逐笔成交
-- **auctions**: 1 个 - 集合竞价
-- **limits**: 2 个 - 涨停板
-- **codes**: 20 个 - 股票列表
-- **f10**: 31 个 - F10 资料
-- **helpers**: 24 个 - 板块、排名等
-- **workdays**: 12 个 - 交易日计算
-- **corporate**: 3 个 - 公司事件
-- **session**: 3 个 - 连接管理
-- **resources**: 3 个 - 资源文件
+### 运行容器
 
-## 配置 SIDA
+```bash
+docker run -d \
+  --name eltdx-tq-gateway \
+  -p 17709:17709 \
+  --restart unless-stopped \
+  ghcr.io/shit6gihub/eltdx-tq-gateway:latest
+```
+
+### 与健康检查
+
+```bash
+curl http://localhost:17709/health
+```
+
+## SIDA 配置
+
+在 `docker-compose.yml` 中添加：
 
 ```yaml
 environment:
   - PANWATCH_ENABLE_TQ=1
-  - TDX_QUANT_URL=http://172.29.0.1:17709
+  - TDX_QUANT_URL=http://host.docker.internal:17709
 ```
 
-重启 panwatch: `docker compose --profile infra up -d --force-recreate panwatch`
+## API 端点
 
-## 依赖
+| 端点 | 说明 |
+|------|------|
+| `POST /` | TQ 兼容接口 |
+| `POST /jsonrpc` | TQ JSON-RPC 接口 |
+| `POST /rpc` | eltdx 原生 RPC 接口 |
+| `GET /health` | 健康检查 |
+| `GET /methods` | 方法列表 |
 
-```bash
-pip install 'eltdx[http]'
-```
+## GitHub Actions
 
-## 端口
+当推送代码到 main 分支时，自动构建 Docker 镜像并推送到 GitHub Container Registry。
 
-- 默认: 17709
-- 绑定: 0.0.0.0
-
-## GitHub
-
-https://github.com/shit6gihub/eltdx-tq-gateway
-
-## 使用方法
-
-### TQ 兼容模式
-```bash
-curl -X POST http://127.0.0.1:17709/jsonrpc \
-  -H "Content-Type: application/json" \
-  -d '{"method":"get_market_snapshot","params":{"stock_code":"002600"},"id":1}'
-```
-
-### eltdx 原生模式
-```bash
-curl -X POST http://127.0.0.1:17709/rpc \
-  -H "Content-Type: application/json" \
-  -d '{"method":"bars.get","params":{"code":"002600","period":"1d","count":5},"id":1}'
-```
+也可以手动触发构建：
+https://github.com/shit6gihub/eltdx-tq-gateway/actions
